@@ -1,11 +1,12 @@
 # vision-inference-benchmark
 
-YOLO detection pipeline project for exporting, benchmarking, and comparing `pt`, `onnx`, `TensorRT`, and `RKNN` models.
+YOLO detection pipeline project for exporting, adapting, benchmarking, and comparing `pt`, `onnx`, `TensorRT`, and `RKNN` models.
 
 ## Goals
 
-- Keep one config for preprocessing, inference, postprocessing, and reporting
+- Keep one config for preprocessing, graph adaptation, inference, postprocessing, and reporting
 - Export YOLO models to `onnx`, `engine`, and `rknn` workflows
+- Add ONNX graph rewrite / operator adaptation before deployment conversion
 - Measure accuracy and latency before and after quantization
 - Report preprocessing time, model inference time, postprocessing time, and total time
 - Compare metric drops after conversion and quantization
@@ -13,25 +14,30 @@ YOLO detection pipeline project for exporting, benchmarking, and comparing `pt`,
 ## Layout
 
 ```text
-pipeline/
-â”œâ”€ README.md
-â”œâ”€ requirements.txt
-â”œâ”€ configs/
-â”‚  â””â”€ pipeline.yaml
-â”œâ”€ pipeline/
-â”‚  â”œâ”€ __init__.py
-â”‚  â”œâ”€ backends.py
-â”‚  â”œâ”€ benchmark.py
-â”‚  â”œâ”€ config.py
-â”‚  â”œâ”€ metrics.py
-â”‚  â”œâ”€ postprocess.py
-â”‚  â”œâ”€ preprocess.py
-â”‚  â””â”€ report.py
-â”œâ”€ reports/
-â””â”€ scripts/
-   â”œâ”€ benchmark_model.py
-   â”œâ”€ compare_reports.py
-   â””â”€ export_yolo.py
+vision-inference-benchmark/
+©À©¤ README.md
+©À©¤ requirements.txt
+©À©¤ configs/
+©¦  ©¸©¤ pipeline.yaml
+©À©¤ pipeline/
+©¦  ©À©¤ __init__.py
+©¦  ©À©¤ backends.py
+©¦  ©À©¤ benchmark.py
+©¦  ©À©¤ config.py
+©¦  ©À©¤ graph_rewrite.py
+©¦  ©À©¤ metrics.py
+©¦  ©À©¤ postprocess.py
+©¦  ©À©¤ preprocess.py
+©¦  ©¸©¤ report.py
+©À©¤ reports/
+©À©¤ scripts/
+©¦  ©À©¤ adapt_model.py
+©¦  ©À©¤ benchmark_model.py
+©¦  ©À©¤ compare_reports.py
+©¦  ©À©¤ export_yolo.py
+©¦  ©À©¤ run_cpp_benchmark_matrix.py
+©¦  ©¸©¤ summarize_benchmarks.py
+©¸©¤ cpp/
 ```
 
 ## What this project tracks
@@ -67,42 +73,75 @@ python scripts/export_yolo.py --config configs/pipeline.yaml --target tensorrt
 python scripts/export_yolo.py --config configs/pipeline.yaml --target rknn
 ```
 
-3. Run benchmark:
+3. Adapt ONNX operators for target backend:
+
+```bash
+python scripts/adapt_model.py --config configs/pipeline.yaml --input weights/yolo11n.onnx --backend tensorrt
+python scripts/adapt_model.py --config configs/pipeline.yaml --input weights/yolo11n.onnx --backend rknn
+```
+
+4. Run benchmark:
 
 ```bash
 python scripts/benchmark_model.py --config configs/pipeline.yaml --backend pt --model weights/yolo11n.pt
 python scripts/benchmark_model.py --config configs/pipeline.yaml --backend onnx --model weights/yolo11n.onnx
 ```
 
-4. Compare reports:
+5. Compare reports:
 
 ```bash
 python scripts/compare_reports.py --baseline reports/pt_fp32.json --candidate reports/tensorrt_int8.json
 ```
 
-5. Summarize multiple reports:
+6. Summarize multiple reports:
 
 ```bash
 python scripts/summarize_benchmarks.py --reports-dir reports --output-prefix reports/summary
 python scripts/summarize_benchmarks.py --reports-dir reports --baseline reports/onnx_fp16_cpp.json --output-prefix reports/summary_vs_onnx_fp16
 ```
 
-6. Run a full C++ benchmark matrix and summarize automatically:
+7. Run a full C++ benchmark matrix and summarize automatically:
 
 ```bash
-python scripts/run_cpp_benchmark_matrix.py \
-  --exe cpp/build/Release/pipeline_benchmark.exe \
-  --config configs/pipeline.yaml \
-  --onnx-fp16 weights/yolo11n_fp16.onnx \
-  --onnx-int8 weights/yolo11n_int8.onnx \
-  --trt-fp16 weights/yolo11n_fp16.engine \
-  --trt-int8 weights/yolo11n_int8.engine \
+python scripts/run_cpp_benchmark_matrix.py ^
+  --exe cpp/build/Release/pipeline_benchmark.exe ^
+  --config configs/pipeline.yaml ^
+  --onnx-fp16 weights/yolo11n_fp16.onnx ^
+  --onnx-int8 weights/yolo11n_int8.onnx ^
+  --trt-fp16 weights/yolo11n_fp16.engine ^
+  --trt-int8 weights/yolo11n_int8.engine ^
   --summary-prefix reports/cpp_matrix_summary
 ```
 
+## Operator Adaptation
+
+For deployment-focused benchmarking, operator adaptation should happen after ONNX export and before TensorRT or RKNN conversion.
+
+The current adaptation stage supports:
+
+- ONNX shape inference
+- Identity node stripping
+- Optional opset conversion
+- Optional `onnxsim` simplify
+- Backend compatibility warnings for TensorRT / RKNN sensitive ops
+
+Run it with:
+
+```bash
+python scripts/adapt_model.py --config configs/pipeline.yaml --input weights/yolo11n.onnx --backend tensorrt
+python scripts/adapt_model.py --config configs/pipeline.yaml --input weights/yolo11n.onnx --backend rknn --output weights/adapted/yolo11n.rknn.onnx
+```
+
+Outputs:
+
+- adapted ONNX model
+- JSON rewrite report under `reports/`
+
+This stage is implemented in `pipeline/graph_rewrite.py` and is the right place to add future model-specific rules such as custom op replacement, plugin fallback tagging, or backend-specific graph normalization.
+
 ## C++ benchmark pipeline
 
-The project now also includes a C++ benchmark scaffold in `cpp/` for measuring inference speed across exported model formats.
+The project also includes a C++ benchmark scaffold in `cpp/` for measuring inference speed across exported model formats.
 
 ### What the C++ version covers
 

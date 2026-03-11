@@ -43,6 +43,16 @@ export:
   calibration_images: data/calibration
   rknn_target: rk3588
 
+adapt:
+  enabled: true
+  output_dir: weights/adapted
+  target_opset: 13
+  infer_shapes: true
+  strip_identity: true
+  simplify: false
+  simplify_check_n: 0
+  compatibility_check: true
+
 benchmark:
   warmup: 10
   runs: 100
