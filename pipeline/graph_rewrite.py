@@ -13,6 +13,7 @@ BACKEND_WARN_OPS: dict[str, set[str]] = {
         "Mod",
         "CumSum",
         "Range",
+        "ScatterND",
     },
     "rknn": {
         "NonMaxSuppression",
@@ -38,8 +39,10 @@ class RewriteResult:
     removed_identity_count: int = 0
     inferred_shapes: bool = False
     simplified: bool = False
+    rewrites_applied: dict[str, int] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
     op_histogram: dict[str, int] = field(default_factory=dict)
+    compatibility: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -53,8 +56,10 @@ class RewriteResult:
             "removed_identity_count": self.removed_identity_count,
             "inferred_shapes": self.inferred_shapes,
             "simplified": self.simplified,
+            "rewrites_applied": self.rewrites_applied,
             "warnings": self.warnings,
             "op_histogram": self.op_histogram,
+            "compatibility": self.compatibility,
         }
 
 
@@ -92,6 +97,33 @@ def histogram_ops(model: Any) -> dict[str, int]:
     return dict(sorted(histogram.items(), key=lambda item: (-item[1], item[0])))
 
 
+def _next_tensor_name(base_name: str, suffix: str, used_names: set[str]) -> str:
+    candidate = f"{base_name}_{suffix}"
+    index = 1
+    while candidate in used_names:
+        candidate = f"{base_name}_{suffix}_{index}"
+        index += 1
+    used_names.add(candidate)
+    return candidate
+
+
+def _collect_value_names(model: Any) -> set[str]:
+    names: set[str] = set()
+    for item in model.graph.input:
+        names.add(item.name)
+    for item in model.graph.output:
+        names.add(item.name)
+    for item in model.graph.value_info:
+        names.add(item.name)
+    for item in model.graph.initializer:
+        names.add(item.name)
+    for node in model.graph.node:
+        names.update(node.input)
+        names.update(node.output)
+    names.discard("")
+    return names
+
+
 def remove_identity_nodes(model: Any) -> tuple[Any, int]:
     removed = 0
     graph = model.graph
@@ -113,6 +145,76 @@ def remove_identity_nodes(model: Any) -> tuple[Any, int]:
     return model, removed
 
 
+def rewrite_custom_activation_ops(model: Any) -> tuple[Any, dict[str, int]]:
+    onnx = _require_onnx()
+    helper = onnx.helper
+    graph = model.graph
+    used_names = _collect_value_names(model)
+    rewrites = {
+        "rewrite_silu": 0,
+        "rewrite_hardswish": 0,
+    }
+
+    new_nodes = []
+    for node in graph.node:
+        if node.op_type in {"SiLU", "Swish"} and len(node.input) == 1 and len(node.output) == 1:
+            input_name = node.input[0]
+            output_name = node.output[0]
+            sigmoid_name = _next_tensor_name(output_name, "sigmoid", used_names)
+            sigmoid_node = helper.make_node("Sigmoid", [input_name], [sigmoid_name], name=f"{node.name or output_name}_sigmoid")
+            mul_node = helper.make_node("Mul", [input_name, sigmoid_name], [output_name], name=f"{node.name or output_name}_mul")
+            new_nodes.extend([sigmoid_node, mul_node])
+            rewrites["rewrite_silu"] += 1
+            continue
+
+        if node.op_type == "HardSwish" and len(node.input) == 1 and len(node.output) == 1:
+            input_name = node.input[0]
+            output_name = node.output[0]
+            hsigmoid_name = _next_tensor_name(output_name, "hsigmoid", used_names)
+            hsigmoid_node = helper.make_node(
+                "HardSigmoid",
+                [input_name],
+                [hsigmoid_name],
+                name=f"{node.name or output_name}_hsigmoid",
+                alpha=1.0 / 6.0,
+                beta=0.5,
+            )
+            mul_node = helper.make_node("Mul", [input_name, hsigmoid_name], [output_name], name=f"{node.name or output_name}_mul")
+            new_nodes.extend([hsigmoid_node, mul_node])
+            rewrites["rewrite_hardswish"] += 1
+            continue
+
+        new_nodes.append(node)
+
+    graph.ClearField("node")
+    graph.node.extend(new_nodes)
+    return model, rewrites
+
+
+def normalize_resize_ops(model: Any, backend: str) -> tuple[Any, dict[str, int]]:
+    if backend.lower() not in {"rknn", "tensorrt"}:
+        return model, {"normalize_resize": 0}
+
+    onnx = _require_onnx()
+    helper = onnx.helper
+    normalized = 0
+    for node in model.graph.node:
+        if node.op_type != "Resize":
+            continue
+        attrs = {attr.name: helper.get_attribute_value(attr) for attr in node.attribute}
+        if "coordinate_transformation_mode" not in attrs:
+            preferred = b"asymmetric" if backend.lower() == "rknn" else b"half_pixel"
+            node.attribute.extend([helper.make_attribute("coordinate_transformation_mode", preferred)])
+            normalized += 1
+        mode = attrs.get("mode", b"nearest")
+        if isinstance(mode, str):
+            mode = mode.encode("utf-8")
+        if mode == b"nearest" and "nearest_mode" not in attrs:
+            node.attribute.extend([helper.make_attribute("nearest_mode", b"floor")])
+            normalized += 1
+    return model, {"normalize_resize": normalized}
+
+
 def infer_shapes(model: Any) -> Any:
     onnx = _require_onnx()
     return onnx.shape_inference.infer_shapes(model)
@@ -131,15 +233,44 @@ def simplify_model(model: Any, check_n: int = 0) -> tuple[Any, bool]:
     return simplify(model, check_n=check_n)
 
 
-def check_backend_compatibility(model: Any, backend: str) -> list[str]:
-    warn_ops = BACKEND_WARN_OPS.get(backend.lower(), set())
-    warnings: list[str] = []
+def _standard_onnx_ops() -> set[str]:
+    onnx = _require_onnx()
+    return {schema.name for schema in onnx.defs.get_all_schemas_with_history()}
+
+
+def build_compatibility_report(model: Any, backend: str) -> dict[str, Any]:
     histogram = histogram_ops(model)
-    for op_name in warn_ops:
-        count = histogram.get(op_name, 0)
-        if count > 0:
+    warn_ops = BACKEND_WARN_OPS.get(backend.lower(), set())
+    standard_ops = _standard_onnx_ops()
+
+    sensitive_ops = []
+    custom_ops = []
+    warnings: list[str] = []
+
+    for op_name, count in histogram.items():
+        if op_name in warn_ops:
+            sensitive_ops.append({
+                "op_type": op_name,
+                "count": count,
+                "status": "needs_review",
+            })
             warnings.append(f"{backend} compatibility warning: op `{op_name}` appears {count} time(s)")
-    return warnings
+        if op_name not in standard_ops:
+            custom_ops.append({
+                "op_type": op_name,
+                "count": count,
+                "status": "custom_op",
+            })
+            warnings.append(f"Custom ONNX op detected: `{op_name}` appears {count} time(s)")
+
+    return {
+        "backend": backend,
+        "total_nodes": sum(histogram.values()),
+        "sensitive_ops": sensitive_ops,
+        "custom_ops": custom_ops,
+        "blocked": bool(sensitive_ops or custom_ops),
+        "warnings": warnings,
+    }
 
 
 def rewrite_onnx_model(
@@ -153,10 +284,13 @@ def rewrite_onnx_model(
     simplify_graph: bool = False,
     simplify_check_n: int = 0,
     compatibility_check: bool = True,
+    rewrite_custom_ops: bool = True,
+    normalize_resize: bool = True,
 ) -> RewriteResult:
     model = _load_model(input_path)
     opset_before = get_opset_version(model)
     node_count_before = len(model.graph.node)
+    rewrites_applied: dict[str, int] = {}
 
     inferred_shapes = False
     if infer_shapes_first:
@@ -167,20 +301,34 @@ def rewrite_onnx_model(
     if strip_identity:
         model, removed_identity_count = remove_identity_nodes(model)
 
+    if rewrite_custom_ops:
+        model, activation_rewrites = rewrite_custom_activation_ops(model)
+        rewrites_applied.update(activation_rewrites)
+
+    if normalize_resize:
+        model, resize_rewrites = normalize_resize_ops(model, backend)
+        rewrites_applied.update(resize_rewrites)
+
     if target_opset is not None:
         current = get_opset_version(model)
         if current is None or current != target_opset:
             model = convert_opset(model, target_opset)
+            rewrites_applied["convert_opset"] = 1
 
     simplified = False
     if simplify_graph:
         model, simplified = simplify_model(model, check_n=simplify_check_n)
 
-    _save_model(model, output_path)
+    compatibility = build_compatibility_report(model, backend) if compatibility_check else {
+        "backend": backend,
+        "total_nodes": len(model.graph.node),
+        "sensitive_ops": [],
+        "custom_ops": [],
+        "blocked": False,
+        "warnings": [],
+    }
 
-    warnings: list[str] = []
-    if compatibility_check:
-        warnings.extend(check_backend_compatibility(model, backend))
+    _save_model(model, output_path)
 
     return RewriteResult(
         input_model=str(Path(input_path)),
@@ -193,6 +341,8 @@ def rewrite_onnx_model(
         removed_identity_count=removed_identity_count,
         inferred_shapes=inferred_shapes,
         simplified=simplified,
-        warnings=warnings,
+        rewrites_applied=rewrites_applied,
+        warnings=list(compatibility.get("warnings", [])),
         op_histogram=histogram_ops(model),
+        compatibility=compatibility,
     )

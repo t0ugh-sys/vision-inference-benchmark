@@ -52,6 +52,14 @@ adapt:
   simplify: false
   simplify_check_n: 0
   compatibility_check: true
+  rewrite_custom_ops: true
+  normalize_resize: true
+
+deploy:
+  tensorrt:
+    builder: trtexec
+    engine_path: weights/yolo11n.engine
+    extra_args: []
 
 benchmark:
   warmup: 10
