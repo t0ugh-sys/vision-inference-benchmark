@@ -1,0 +1,55 @@
+project:
+  name: vision-inference-benchmark
+  report_dir: reports
+
+dataset:
+  data: data/dataset.yaml
+  val_images: data/images/val
+  val_labels: data/labels/val
+  class_names: []
+
+model:
+  pt: weights/yolo11n.pt
+  onnx: weights/yolo11n.onnx
+  tensorrt: weights/yolo11n.engine
+  rknn: weights/yolo11n.rknn
+  imgsz: 640
+  conf: 0.25
+  iou: 0.45
+  max_det: 300
+  device: cuda:0
+
+preprocess:
+  imgsz: 640
+  bgr_to_rgb: true
+  normalize: true
+  mean: [0.0, 0.0, 0.0]
+  std: [255.0, 255.0, 255.0]
+  keep_ratio: true
+  stride: 32
+
+postprocess:
+  conf: 0.25
+  iou: 0.45
+  max_det: 300
+
+export:
+  opset: 12
+  simplify: true
+  dynamic: false
+  workspace: 4
+  half: false
+  int8: false
+  calibration_images: data/calibration
+  rknn_target: rk3588
+
+benchmark:
+  warmup: 10
+  runs: 100
+  save_report: true
+  report_name: pt_fp32.json
+
+accuracy:
+  enabled: true
+  source: ultralytics
+  split: val
