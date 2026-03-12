@@ -59,6 +59,34 @@ class GraphRewriteTests(unittest.TestCase):
         self.assertEqual(result.rewrites_applied['rewrite_silu'], 1)
         self.assertEqual([node.op_type for node in rewritten.graph.node], ['Sigmoid', 'Mul'])
 
+    def test_strip_trailing_nms_node(self) -> None:
+        input_path = self.base / 'nms.onnx'
+        output_path = self.base / 'nms.out.onnx'
+
+        boxes = helper.make_tensor_value_info('boxes', TensorProto.FLOAT, [1, 10, 4])
+        scores = helper.make_tensor_value_info('scores', TensorProto.FLOAT, [1, 1, 10])
+        selected = helper.make_tensor_value_info('selected_indices', TensorProto.INT64, [10, 3])
+        max_output = helper.make_tensor('max_output_boxes_per_class', TensorProto.INT64, [1], [10])
+        iou_threshold = helper.make_tensor('iou_threshold', TensorProto.FLOAT, [1], [0.5])
+        score_threshold = helper.make_tensor('score_threshold', TensorProto.FLOAT, [1], [0.25])
+        nms = helper.make_node(
+            'NonMaxSuppression',
+            ['boxes', 'scores', 'max_output_boxes_per_class', 'iou_threshold', 'score_threshold'],
+            ['selected_indices'],
+            name='nms0',
+        )
+        graph = helper.make_graph([nms], 'nms_graph', [boxes, scores], [selected], [max_output, iou_threshold, score_threshold])
+        model = helper.make_model(graph, producer_name='test', opset_imports=[helper.make_opsetid('', 13)])
+        self._save_model(model, input_path)
+
+        result = rewrite_onnx_model(input_path, output_path, 'tensorrt', fail_on_blocked=True)
+        rewritten = _load_model(output_path)
+
+        self.assertEqual(result.rewrites_applied['strip_nms'], 1)
+        self.assertEqual([node.op_type for node in rewritten.graph.node], [])
+        self.assertEqual([output.name for output in rewritten.graph.output], ['boxes', 'scores'])
+        self.assertEqual(result.compatibility['blocked'], False)
+
     def test_support_report_blocks_nms_for_tensorrt(self) -> None:
         x = helper.make_tensor_value_info('boxes', TensorProto.FLOAT, [1, 10, 4])
         s = helper.make_tensor_value_info('scores', TensorProto.FLOAT, [1, 1, 10])

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -132,6 +133,36 @@ def _collect_value_names(model: Any) -> set[str]:
     return names
 
 
+def _find_value_info_proto(model: Any, name: str):
+    for collection in (model.graph.output, model.graph.value_info, model.graph.input):
+        for item in collection:
+            if item.name == name:
+                return copy.deepcopy(item)
+    return None
+
+
+def _make_unknown_value_info(name: str):
+    onnx = _require_onnx()
+    return onnx.helper.make_tensor_value_info(name, onnx.TensorProto.FLOAT, None)
+
+
+def _is_consumed(model: Any, tensor_name: str, skip_node: Any) -> bool:
+    for node in model.graph.node:
+        if node is skip_node:
+            continue
+        if tensor_name in node.input:
+            return True
+    return False
+
+
+def _append_graph_output(model: Any, tensor_name: str) -> bool:
+    if any(output.name == tensor_name for output in model.graph.output):
+        return False
+    proto = _find_value_info_proto(model, tensor_name) or _make_unknown_value_info(tensor_name)
+    model.graph.output.extend([proto])
+    return True
+
+
 def remove_identity_nodes(model: Any) -> tuple[Any, int]:
     removed = 0
     graph = model.graph
@@ -197,6 +228,39 @@ def rewrite_custom_activation_ops(model: Any) -> tuple[Any, dict[str, int]]:
     graph.ClearField("node")
     graph.node.extend(new_nodes)
     return model, rewrites
+
+
+def strip_nms_tail(model: Any, backend: str) -> tuple[Any, dict[str, int], list[str]]:
+    if backend.lower() not in {"tensorrt", "rknn"}:
+        return model, {"strip_nms": 0}, []
+
+    removed = 0
+    warnings: list[str] = []
+    graph = model.graph
+    nodes = list(graph.node)
+    for node in nodes:
+        if node.op_type != "NonMaxSuppression" or len(node.input) < 2 or len(node.output) != 1:
+            continue
+        nms_output = node.output[0]
+        if _is_consumed(model, nms_output, node):
+            warnings.append(f"Skipped NMS strip for node `{node.name or nms_output}` because its output is consumed by later nodes")
+            continue
+
+        graph_outputs = [output.name for output in graph.output]
+        if nms_output in graph_outputs:
+            graph.ClearField("output")
+            for name in graph_outputs:
+                if name != nms_output:
+                    proto = _find_value_info_proto(model, name) or _make_unknown_value_info(name)
+                    graph.output.extend([proto])
+
+        added_boxes = _append_graph_output(model, node.input[0])
+        added_scores = _append_graph_output(model, node.input[1])
+        if added_boxes or added_scores:
+            removed += 1
+            graph.node.remove(node)
+
+    return model, {"strip_nms": removed}, warnings
 
 
 def normalize_resize_ops(model: Any, backend: str) -> tuple[Any, dict[str, int]]:
@@ -294,6 +358,7 @@ def rewrite_onnx_model(
     compatibility_check: bool = True,
     rewrite_custom_ops: bool = True,
     normalize_resize: bool = True,
+    strip_nms: bool = True,
     fail_on_blocked: bool = False,
 ) -> RewriteResult:
     input_path = Path(input_path).resolve()
@@ -303,6 +368,7 @@ def rewrite_onnx_model(
     opset_before = get_opset_version(model)
     node_count_before = len(model.graph.node)
     rewrites_applied: dict[str, int] = {}
+    rewrite_warnings: list[str] = []
 
     inferred_shapes = False
     if infer_shapes_first:
@@ -316,6 +382,11 @@ def rewrite_onnx_model(
     if rewrite_custom_ops:
         model, activation_rewrites = rewrite_custom_activation_ops(model)
         rewrites_applied.update(activation_rewrites)
+
+    if strip_nms:
+        model, nms_rewrites, nms_warnings = strip_nms_tail(model, backend)
+        rewrites_applied.update(nms_rewrites)
+        rewrite_warnings.extend(nms_warnings)
 
     if normalize_resize:
         model, resize_rewrites = normalize_resize_ops(model, backend)
@@ -342,6 +413,7 @@ def rewrite_onnx_model(
 
     _save_model(model, output_path)
 
+    warnings = rewrite_warnings + list(compatibility.get("warnings", []))
     result = RewriteResult(
         input_model=str(input_path),
         output_model=str(output_path),
@@ -354,7 +426,7 @@ def rewrite_onnx_model(
         inferred_shapes=inferred_shapes,
         simplified=simplified,
         rewrites_applied=rewrites_applied,
-        warnings=list(compatibility.get("warnings", [])),
+        warnings=warnings,
         op_histogram=histogram_ops(model),
         compatibility=compatibility,
         status="blocked" if compatibility.get("blocked", False) else "ok",

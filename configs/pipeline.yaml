@@ -49,6 +49,7 @@ adapt:
   target_opset: 13
   infer_shapes: true
   strip_identity: true
+  strip_nms: true
   simplify: false
   simplify_check_n: 0
   compatibility_check: true
