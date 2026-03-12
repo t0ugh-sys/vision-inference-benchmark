@@ -54,6 +54,7 @@ adapt:
   compatibility_check: true
   rewrite_custom_ops: true
   normalize_resize: true
+  fail_on_blocked: false
 
 deploy:
   tensorrt:

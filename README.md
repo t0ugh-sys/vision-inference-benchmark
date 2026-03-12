@@ -33,6 +33,7 @@ vision-inference-benchmark/
 |- scripts/
 |  |- adapt_model.py
 |  |- benchmark_model.py
+|  |- check_backend_support.py
 |  |- compare_reports.py
 |  |- export_yolo.py
 |  |- run_cpp_benchmark_matrix.py
@@ -55,14 +56,20 @@ python scripts/export_yolo.py --config configs/pipeline.yaml --target tensorrt -
 python scripts/export_yolo.py --config configs/pipeline.yaml --target rknn --adapt --int8
 ```
 
-4. Run benchmark:
+4. Audit backend operator support before deployment:
+
+```bash
+python scripts/check_backend_support.py --input weights/test_model.onnx --backend tensorrt --report reports/test_model.support.json
+```
+
+5. Run benchmark:
 
 ```bash
 python scripts/benchmark_model.py --config configs/pipeline.yaml --backend onnx --model weights/adapted/yolo11n.tensorrt.onnx
 python scripts/benchmark_model.py --config configs/pipeline.yaml --backend tensorrt --model weights/yolo11n.engine
 ```
 
-5. Summarize reports:
+6. Summarize reports:
 
 ```bash
 python scripts/summarize_benchmarks.py --reports-dir reports --output-prefix reports/summary
@@ -82,6 +89,7 @@ The current adaptation stage supports:
 - Backend-specific `Resize` normalization
 - Backend compatibility report for TensorRT and RKNN sensitive ops
 - Custom-op detection report
+- Optional `fail_on_blocked` behavior for CI or deployment gating
 
 Run it directly with:
 
@@ -97,11 +105,28 @@ Outputs:
 
 The report now includes:
 
+- `status`
+- `stage`
+- `error`
 - `rewrites_applied`
 - `op_histogram`
 - `compatibility.sensitive_ops`
 - `compatibility.custom_ops`
 - `compatibility.blocked`
+- `artifacts`
+
+## Support Audit
+
+`check_backend_support.py` audits a model without rewriting it.
+
+Examples:
+
+```bash
+python scripts/check_backend_support.py --input weights/test_model.onnx --backend tensorrt
+python scripts/check_backend_support.py --input weights/test_model.onnx --backend rknn --report reports/test_model.rknn.support.json --fail-on-blocked
+```
+
+Use this when you want a fast operator-compatibility verdict before export, adaptation, or deployment.
 
 ## Export -> Adapt -> Convert
 

@@ -43,9 +43,16 @@ class RewriteResult:
     warnings: list[str] = field(default_factory=list)
     op_histogram: dict[str, int] = field(default_factory=dict)
     compatibility: dict[str, Any] = field(default_factory=dict)
+    status: str = "ok"
+    stage: str = "adapt"
+    error: str | None = None
+    artifacts: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "status": self.status,
+            "stage": self.stage,
+            "error": self.error,
             "input_model": self.input_model,
             "output_model": self.output_model,
             "backend": self.backend,
@@ -60,6 +67,7 @@ class RewriteResult:
             "warnings": self.warnings,
             "op_histogram": self.op_histogram,
             "compatibility": self.compatibility,
+            "artifacts": self.artifacts,
         }
 
 
@@ -286,7 +294,11 @@ def rewrite_onnx_model(
     compatibility_check: bool = True,
     rewrite_custom_ops: bool = True,
     normalize_resize: bool = True,
+    fail_on_blocked: bool = False,
 ) -> RewriteResult:
+    input_path = Path(input_path).resolve()
+    output_path = Path(output_path).resolve()
+
     model = _load_model(input_path)
     opset_before = get_opset_version(model)
     node_count_before = len(model.graph.node)
@@ -330,9 +342,9 @@ def rewrite_onnx_model(
 
     _save_model(model, output_path)
 
-    return RewriteResult(
-        input_model=str(Path(input_path)),
-        output_model=str(Path(output_path)),
+    result = RewriteResult(
+        input_model=str(input_path),
+        output_model=str(output_path),
         backend=backend,
         opset_before=opset_before,
         opset_after=get_opset_version(model),
@@ -345,4 +357,16 @@ def rewrite_onnx_model(
         warnings=list(compatibility.get("warnings", [])),
         op_histogram=histogram_ops(model),
         compatibility=compatibility,
+        status="blocked" if compatibility.get("blocked", False) else "ok",
+        stage="adapt",
+        error="Compatibility check blocked the graph" if compatibility.get("blocked", False) else None,
+        artifacts={
+            "input_model": str(input_path),
+            "output_model": str(output_path),
+        },
     )
+
+    if compatibility.get("blocked", False) and fail_on_blocked:
+        raise RuntimeError("Compatibility check blocked the graph. Inspect the rewrite report for details.")
+
+    return result
