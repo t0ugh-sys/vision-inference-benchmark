@@ -5,7 +5,7 @@ from pathlib import Path
 import onnx
 from onnx import TensorProto, helper
 
-from pipeline.graph_rewrite import rewrite_onnx_model, build_compatibility_report, _load_model
+from pipeline.graph_rewrite import analyze_yolo_patterns, build_compatibility_report, rewrite_onnx_model, _load_model
 
 
 class GraphRewriteTests(unittest.TestCase):
@@ -86,6 +86,7 @@ class GraphRewriteTests(unittest.TestCase):
         self.assertEqual([node.op_type for node in rewritten.graph.node], [])
         self.assertEqual([output.name for output in rewritten.graph.output], ['boxes', 'scores'])
         self.assertEqual(result.compatibility['blocked'], False)
+        self.assertEqual(result.model_analysis['embedded_nms'], False)
 
     def test_support_report_blocks_nms_for_tensorrt(self) -> None:
         x = helper.make_tensor_value_info('boxes', TensorProto.FLOAT, [1, 10, 4])
@@ -107,6 +108,23 @@ class GraphRewriteTests(unittest.TestCase):
 
         self.assertTrue(report['blocked'])
         self.assertEqual(report['sensitive_ops'][0]['op_type'], 'NonMaxSuppression')
+
+    def test_analyze_dfl_like_head_pattern(self) -> None:
+        x = helper.make_tensor_value_info('input', TensorProto.FLOAT, [1, 64, 20, 20])
+        y = helper.make_tensor_value_info('output', TensorProto.FLOAT, [1, 84, 8400])
+        conv_w = helper.make_tensor('conv_w', TensorProto.FLOAT, [64, 64, 1, 1], [0.0] * (64 * 64))
+        conv_b = helper.make_tensor('conv_b', TensorProto.FLOAT, [64], [0.0] * 64)
+        conv = helper.make_node('Conv', ['input', 'conv_w', 'conv_b'], ['conv_out'], name='conv0')
+        reshape_shape = helper.make_tensor('reshape_shape', TensorProto.INT64, [4], [1, 4, 16, 400])
+        reshape = helper.make_node('Reshape', ['conv_out', 'reshape_shape'], ['reshape_out'], name='reshape0')
+        softmax = helper.make_node('Softmax', ['reshape_out'], ['softmax_out'], name='softmax0', axis=2)
+        graph = helper.make_graph([conv, reshape, softmax], 'dfl_graph', [x], [y], [conv_w, conv_b, reshape_shape])
+        model = helper.make_model(graph, producer_name='test', opset_imports=[helper.make_opsetid('', 13)])
+
+        analysis = analyze_yolo_patterns(model)
+
+        self.assertTrue(analysis['dfl_like_head'])
+        self.assertTrue(any('DFL-like head pattern' in note for note in analysis['notes']))
 
 
 if __name__ == '__main__':

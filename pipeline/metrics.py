@@ -49,10 +49,14 @@ def merge_report(
     timing: TimingMetrics,
     accuracy: Optional[AccuracyMetrics] = None,
     quantized: bool = False,
+    model_name: str = "",
+    precision: str = "unknown",
 ) -> Dict[str, object]:
     report: Dict[str, object] = {
         "backend": backend,
+        "model_name": model_name,
         "model_path": model_path,
+        "precision": precision,
         "quantized": quantized,
         "timing": timing.summary(),
     }

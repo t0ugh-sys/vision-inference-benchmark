@@ -9,6 +9,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from pipeline.config import ensure_directory, resolve_path
+from pipeline.summary import summarize_reports
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run a C++ benchmark matrix and generate summary files.")
@@ -28,20 +31,17 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def resolve_path(value: str | None, base: Path) -> Path | None:
+def resolve_optional_path(value: str | None, base: Path) -> Path | None:
     if not value:
         return None
-    path = Path(value)
-    if path.is_absolute():
-        return path
-    return (base / path).resolve()
+    return resolve_path(base, value)
 
 
 def build_cases(args: argparse.Namespace, root: Path, reports_dir: Path) -> list[dict[str, object]]:
     cases: list[dict[str, object]] = []
 
     def add_case(name: str, backend: str, precision: str, quantized: bool, model_arg: str | None) -> None:
-        model_path = resolve_path(model_arg, root)
+        model_path = resolve_optional_path(model_arg, root)
         if model_path is None:
             return
         cases.append(
@@ -91,33 +91,24 @@ def run_case(exe: Path, config: Path, images: Path | None, warmup: int | None, r
 
 
 def run_summary(reports_dir: Path, summary_prefix: Path, baseline: Path | None) -> None:
-    command = [
-        sys.executable,
-        str(ROOT / "scripts" / "summarize_benchmarks.py"),
-        "--reports-dir",
-        str(reports_dir),
-        "--pattern",
-        "*_cpp.json",
-        "--output-prefix",
-        str(summary_prefix),
-    ]
-    if baseline is not None:
-        command.extend(["--baseline", str(baseline)])
-
-    print("Running:", " ".join(command))
-    subprocess.run(command, check=True)
+    summarize_reports(
+        reports_dir=reports_dir,
+        pattern="*_cpp.json",
+        output_prefix=summary_prefix,
+        baseline_path=baseline,
+    )
 
 
 def main() -> None:
     args = parse_args()
     root = ROOT
 
-    exe = resolve_path(args.exe, root)
-    config = resolve_path(args.config, root)
-    reports_dir = resolve_path(args.reports_dir, root)
-    images = resolve_path(args.images, root)
-    summary_prefix = resolve_path(args.summary_prefix, root)
-    baseline = resolve_path(args.baseline, root)
+    exe = resolve_optional_path(args.exe, root)
+    config = resolve_optional_path(args.config, root)
+    reports_dir = resolve_optional_path(args.reports_dir, root)
+    images = resolve_optional_path(args.images, root)
+    summary_prefix = resolve_optional_path(args.summary_prefix, root)
+    baseline = resolve_optional_path(args.baseline, root)
 
     if exe is None or not exe.exists():
         raise FileNotFoundError(f"Benchmark executable not found: {args.exe}")
@@ -126,7 +117,7 @@ def main() -> None:
     if reports_dir is None:
         raise FileNotFoundError("Reports directory could not be resolved")
 
-    reports_dir.mkdir(parents=True, exist_ok=True)
+    ensure_directory(reports_dir)
     cases = build_cases(args, root, reports_dir)
     if not cases:
         raise ValueError("No benchmark cases configured. Pass at least one of --onnx-fp16, --onnx-int8, --trt-fp16, --trt-int8.")

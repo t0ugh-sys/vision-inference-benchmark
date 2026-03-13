@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-import json
 import shutil
 import subprocess
 import sys
@@ -11,6 +10,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import argparse
+
+from pipeline.config import load_project_config, resolve_path
+from pipeline.report import save_report
 
 
 def parse_args() -> argparse.Namespace:
@@ -24,14 +26,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-adapt", action="store_true", help="Disable ONNX adaptation even if enabled in config")
     parser.add_argument("--fail-on-blocked", action="store_true", help="Fail when adaptation marks the graph as blocked")
     return parser.parse_args()
-
-
-def resolve_path(base_dir: Path, value: str | Path) -> Path:
-    path = Path(value)
-    if path.is_absolute():
-        return path.resolve()
-    return (base_dir / path).resolve()
-
 
 def export_onnx_with_ultralytics(config: dict, weights: str, half: bool, int8: bool) -> Path:
     from ultralytics import YOLO
@@ -90,8 +84,7 @@ def adapt_onnx(config: dict, project_root: Path, input_path: Path, backend: str,
         fail_on_blocked=fail_on_blocked or bool(adapt_cfg.get("fail_on_blocked", False)),
     )
 
-    report_path.parent.mkdir(parents=True, exist_ok=True)
-    report_path.write_text(json.dumps(result.to_dict(), indent=2, ensure_ascii=True), encoding="utf-8")
+    save_report(report_path, result.to_dict())
     print(f"Adapted ONNX saved to {output_path}")
     print(f"Adaptation report saved to {report_path}")
     return output_path, report_path, result.to_dict()
@@ -154,11 +147,7 @@ def export_rknn_stub(config: dict, source_onnx: Path, int8: bool) -> None:
 def main() -> None:
     args = parse_args()
 
-    from pipeline.config import load_config
-
-    config_path = resolve_path(ROOT, args.config)
-    config = load_config(config_path)
-    project_root = config_path.parent.parent
+    config_path, config, project_root = load_project_config(resolve_path(ROOT, args.config))
 
     weights = resolve_path(project_root, args.weights or config["model"]["pt"])
     if not weights.exists():

@@ -28,7 +28,9 @@ vision-inference-benchmark/
 |  |- metrics.py
 |  |- postprocess.py
 |  |- preprocess.py
+|  |- model_zoo.py
 |  |- report.py
+|  |- summary.py
 |- reports/
 |- scripts/
 |  |- adapt_model.py
@@ -37,6 +39,7 @@ vision-inference-benchmark/
 |  |- compare_reports.py
 |  |- export_yolo.py
 |  |- run_cpp_benchmark_matrix.py
+|  |- run_model_zoo_benchmark.py
 |  |- summarize_benchmarks.py
 |- cpp/
 ```
@@ -74,6 +77,15 @@ python scripts/benchmark_model.py --config configs/pipeline.yaml --backend tenso
 ```bash
 python scripts/summarize_benchmarks.py --reports-dir reports --output-prefix reports/summary
 ```
+
+## Reusable structure
+
+The reusable logic lives in `pipeline/`, while `scripts/` should stay thin and only handle CLI arguments.
+
+- `pipeline.config`: shared config loading, path resolution, and directory helpers
+- `pipeline.report`: shared JSON report read and write helpers
+- `pipeline.summary`: shared report discovery, summary row building, sorting, and markdown/csv/json output
+- `pipeline.model_zoo`: shared multi-model benchmark case generation
 
 ## Operator Adaptation
 
@@ -113,6 +125,10 @@ The report now includes:
 - `compatibility.sensitive_ops`
 - `compatibility.custom_ops`
 - `compatibility.blocked`
+- `model_analysis.embedded_nms`
+- `model_analysis.dfl_like_head`
+- `model_analysis.multiscale_concat_head`
+- `model_analysis.decoded_detection_output`
 - `artifacts`
 
 ## Support Audit
@@ -183,6 +199,25 @@ cmake --build build --config Release
 ```bash
 python scripts/run_cpp_benchmark_matrix.py --exe cpp/build/Release/pipeline_benchmark.exe --config configs/pipeline.yaml --onnx-fp16 weights/yolo11n_fp16.onnx --onnx-int8 weights/yolo11n_int8.onnx --trt-fp16 weights/yolo11n_fp16.engine --trt-int8 weights/yolo11n_int8.engine --summary-prefix reports/cpp_matrix_summary
 ```
+
+### Multi-model speed comparison
+
+Use `benchmark_matrix` in `configs/pipeline.yaml` to compare multiple model families such as `YOLOv8`, `YOLO11`, and `YOLO26`.
+
+Example:
+
+```bash
+python scripts/run_model_zoo_benchmark.py --config configs/pipeline.yaml --models yolov8 yolo11 yolo26 --backends pt onnx --precisions fp32 fp16 int8 --skip-missing
+```
+
+This script:
+
+- reads model variants from `benchmark_matrix.models`
+- runs `scripts/benchmark_model.py` for each matched case
+- writes per-case JSON reports under `reports/model_zoo/`
+- generates `summary.json`, `summary.csv`, and `summary.md` for cross-model comparison
+
+`pt` cases can use Ultralytics model aliases directly, while `onnx` and `tensorrt` cases expect exported files to exist first.
 
 ## Notes
 

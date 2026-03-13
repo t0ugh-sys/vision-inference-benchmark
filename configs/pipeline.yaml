@@ -69,6 +69,27 @@ benchmark:
   save_report: true
   report_name: pt_fp32.json
 
+benchmark_matrix:
+  models:
+    yolov8:
+      pt: yolov8n.pt
+      onnx_fp16: weights/adapted/yolov8n.onnxruntime.onnx
+      onnx_int8: weights/adapted/yolov8n_int8.onnxruntime.onnx
+      tensorrt_fp16: weights/yolov8n_fp16.engine
+      tensorrt_int8: weights/yolov8n_int8.engine
+    yolo11:
+      pt: yolo11n.pt
+      onnx_fp16: weights/adapted/yolo11n.onnxruntime.onnx
+      onnx_int8: weights/adapted/yolo11n_int8.onnxruntime.onnx
+      tensorrt_fp16: weights/yolo11n_fp16.engine
+      tensorrt_int8: weights/yolo11n_int8.engine
+    yolo26:
+      pt: yolo26n.pt
+      onnx_fp16: weights/adapted/yolo26n.onnxruntime.onnx
+      onnx_int8: weights/adapted/yolo26n_int8.onnxruntime.onnx
+      tensorrt_fp16: weights/yolo26n_fp16.engine
+      tensorrt_int8: weights/yolo26n_int8.engine
+
 accuracy:
   enabled: true
   source: ultralytics

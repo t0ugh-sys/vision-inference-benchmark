@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import argparse
-import json
-from pathlib import Path
 import sys
+
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+from pipeline.config import ensure_directory, load_project_config, resolve_path
+from pipeline.report import save_report
 
 
 def parse_args() -> argparse.Namespace:
@@ -25,24 +28,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fail-on-blocked", action="store_true", help="Fail when compatibility report is blocked")
     return parser.parse_args()
 
-
-def resolve_path(base_dir: Path, value: str | Path) -> Path:
-    path = Path(value)
-    if path.is_absolute():
-        return path.resolve()
-    return (base_dir / path).resolve()
-
-
 def main() -> None:
     args = parse_args()
 
-    from pipeline.config import load_config
     from pipeline.graph_rewrite import rewrite_onnx_model
 
-    config_path = resolve_path(ROOT, args.config)
-    config = load_config(config_path)
+    config_path, config, project_root = load_project_config(resolve_path(ROOT, args.config))
     adapt_cfg = config.get("adapt", {})
-    project_root = config_path.parent.parent
 
     input_path = resolve_path(project_root, args.input)
     if not input_path.exists():
@@ -71,8 +63,8 @@ def main() -> None:
         fail_on_blocked=args.fail_on_blocked or bool(adapt_cfg.get("fail_on_blocked", False)),
     )
 
-    report_path.parent.mkdir(parents=True, exist_ok=True)
-    report_path.write_text(json.dumps(result.to_dict(), indent=2, ensure_ascii=True), encoding="utf-8")
+    ensure_directory(report_path.parent)
+    save_report(report_path, result.to_dict())
 
     print(f"Adapted model saved to {output_path}")
     print(f"Rewrite report saved to {report_path}")

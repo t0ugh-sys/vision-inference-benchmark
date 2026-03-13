@@ -44,6 +44,7 @@ class RewriteResult:
     warnings: list[str] = field(default_factory=list)
     op_histogram: dict[str, int] = field(default_factory=dict)
     compatibility: dict[str, Any] = field(default_factory=dict)
+    model_analysis: dict[str, Any] = field(default_factory=dict)
     status: str = "ok"
     stage: str = "adapt"
     error: str | None = None
@@ -68,6 +69,7 @@ class RewriteResult:
             "warnings": self.warnings,
             "op_histogram": self.op_histogram,
             "compatibility": self.compatibility,
+            "model_analysis": self.model_analysis,
             "artifacts": self.artifacts,
         }
 
@@ -161,6 +163,61 @@ def _append_graph_output(model: Any, tensor_name: str) -> bool:
     proto = _find_value_info_proto(model, tensor_name) or _make_unknown_value_info(tensor_name)
     model.graph.output.extend([proto])
     return True
+
+
+def _shape_dims(value_info: Any) -> list[int | str | None]:
+    dims: list[int | str | None] = []
+    tensor_type = value_info.type.tensor_type
+    for dim in tensor_type.shape.dim:
+        if dim.HasField("dim_value"):
+            dims.append(int(dim.dim_value))
+        elif dim.HasField("dim_param"):
+            dims.append(dim.dim_param)
+        else:
+            dims.append(None)
+    return dims
+
+
+def analyze_yolo_patterns(model: Any) -> dict[str, Any]:
+    histogram = histogram_ops(model)
+    output_shapes = {
+        output.name: _shape_dims(output)
+        for output in model.graph.output
+    }
+
+    has_nms = histogram.get("NonMaxSuppression", 0) > 0
+    has_dfl_like = histogram.get("Softmax", 0) > 0 and histogram.get("Reshape", 0) > 0 and histogram.get("Conv", 0) > 0
+    has_multiscale_head = histogram.get("Concat", 0) > 0 and histogram.get("Resize", 0) > 0 and histogram.get("Conv", 0) >= 10
+
+    decoded_output = False
+    for shape in output_shapes.values():
+        if not shape:
+            continue
+        for dim in shape:
+            if dim in {84, 85, 116}:
+                decoded_output = True
+                break
+        if decoded_output:
+            break
+
+    notes: list[str] = []
+    if has_dfl_like:
+        notes.append("DFL-like head pattern detected (Conv/Reshape/Softmax chain present)")
+    if has_multiscale_head:
+        notes.append("YOLO-style multi-scale concat head pattern detected")
+    if decoded_output:
+        notes.append("Decoded detection output shape detected on graph outputs")
+    if has_nms:
+        notes.append("Embedded NMS detected in graph")
+
+    return {
+        "embedded_nms": has_nms,
+        "dfl_like_head": has_dfl_like,
+        "multiscale_concat_head": has_multiscale_head,
+        "decoded_detection_output": decoded_output,
+        "output_shapes": output_shapes,
+        "notes": notes,
+    }
 
 
 def remove_identity_nodes(model: Any) -> tuple[Any, int]:
@@ -410,6 +467,7 @@ def rewrite_onnx_model(
         "blocked": False,
         "warnings": [],
     }
+    model_analysis = analyze_yolo_patterns(model)
 
     _save_model(model, output_path)
 
@@ -429,6 +487,7 @@ def rewrite_onnx_model(
         warnings=warnings,
         op_histogram=histogram_ops(model),
         compatibility=compatibility,
+        model_analysis=model_analysis,
         status="blocked" if compatibility.get("blocked", False) else "ok",
         stage="adapt",
         error="Compatibility check blocked the graph" if compatibility.get("blocked", False) else None,

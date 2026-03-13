@@ -9,7 +9,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from pipeline.benchmark import run_benchmark, run_ultralytics_accuracy
-from pipeline.config import ensure_report_dir, load_config
+from pipeline.config import ensure_directory, ensure_report_dir, load_config
 from pipeline.report import save_report
 
 
@@ -20,6 +20,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", required=True, help="Model path")
     parser.add_argument("--images", help="Validation images directory override")
     parser.add_argument("--report-name", help="Output report filename")
+    parser.add_argument("--report-dir", help="Output report directory override")
+    parser.add_argument("--model-name", help="Logical model name used in reports")
+    parser.add_argument("--precision", help="Precision tag used in reports, such as fp32, fp16, int8")
     parser.add_argument("--quantized", action="store_true", help="Mark report as quantized")
     return parser.parse_args()
 
@@ -29,6 +32,8 @@ def main() -> None:
     config = load_config(args.config)
     image_dir = args.images or config["dataset"]["val_images"]
     report = run_benchmark(config, args.backend, args.model, image_dir)
+    report["model_name"] = args.model_name or Path(args.model).stem
+    report["precision"] = args.precision or ("int8" if args.quantized else ("fp32" if args.backend == "pt" else "unknown"))
 
     if config.get("accuracy", {}).get("enabled", False):
         try:
@@ -39,7 +44,7 @@ def main() -> None:
 
     report["quantized"] = bool(args.quantized)
 
-    report_dir = ensure_report_dir(config)
+    report_dir = ensure_directory(args.report_dir) if args.report_dir else ensure_report_dir(config)
     report_name = args.report_name or config["benchmark"].get("report_name", f"{args.backend}.json")
     save_report(report_dir / Path(report_name).name, report)
     print(f"Saved report to {report_dir / Path(report_name).name}")

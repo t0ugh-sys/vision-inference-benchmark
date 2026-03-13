@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
 import sys
+
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from pipeline.config import resolve_path
 from pipeline.metrics import AccuracyMetrics, compare_accuracy
 from pipeline.report import load_report
 
@@ -22,8 +24,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    baseline = load_report(args.baseline)
-    candidate = load_report(args.candidate)
+    baseline = load_report(resolve_path(ROOT, args.baseline))
+    candidate = load_report(resolve_path(ROOT, args.candidate))
 
     output = {
         "baseline_backend": baseline["backend"],
